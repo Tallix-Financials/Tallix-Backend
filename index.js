@@ -17,6 +17,7 @@ if (!process.env.ADMIN_EMAIL) {
 const app = express();
 const PORT = process.env.PORT || 3001;
 const resend = new Resend(process.env.RESEND_API_KEY);
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
 
 app.use(cors());
 app.use(express.json());
@@ -42,7 +43,7 @@ app.post('/api/contact', async (req, res) => {
 
     // Email to client
     const clientEmailOptions = {
-      from: 'onboarding@resend.dev',
+      from: FROM_EMAIL,
       to: email,
       subject: 'Thank You for Contacting Tallix Financials',
       html: `
@@ -100,7 +101,7 @@ app.post('/api/contact', async (req, res) => {
 
     // Email to admin
     const adminEmailOptions = {
-      from: 'onboarding@resend.dev',
+      from: FROM_EMAIL,
       to: process.env.ADMIN_EMAIL,
       subject: `New ${formType === 'pricing' ? 'Pricing Plan' : 'Contact'} Inquiry - Tallix Financials`,
       html: `
@@ -171,21 +172,69 @@ app.post('/api/contact', async (req, res) => {
       `,
     };
 
-    // Send emails
-    await resend.emails.send(adminEmailOptions);
-    
-    // The client confirmation email is now enabled.
-    // This will only work after you have a verified domain with Resend.
-    await resend.emails.send(clientEmailOptions);
+    // Send emails separately to handle individual failures
+    let adminEmailSent = false;
+    let clientEmailSent = false;
+    let clientEmailError = null;
 
-    console.log('✅ Emails sent successfully to:', { client: email, admin: process.env.ADMIN_EMAIL });
-    res.status(200).json({ message: 'Emails sent successfully' });
+    try {
+      const adminResult = await resend.emails.send(adminEmailOptions);
+      adminEmailSent = true;
+      console.log('✅ Admin email sent successfully:', adminResult);
+    } catch (adminError) {
+      console.error('❌ Failed to send admin email:', adminError);
+      throw adminError; // Re-throw admin errors as they're critical
+    }
+
+    // Try to send client confirmation email
+    try {
+      const clientResult = await resend.emails.send(clientEmailOptions);
+      clientEmailSent = true;
+      console.log('✅ Client confirmation email sent successfully:', clientResult);
+    } catch (clientError) {
+      clientEmailError = clientError;
+      console.error('❌ Failed to send client confirmation email:', clientError);
+      console.error('📧 Client email error details:', {
+        message: clientError?.message,
+        name: clientError?.name,
+        statusCode: clientError?.statusCode,
+        response: clientError?.response,
+      });
+      
+      // Common issue: Resend requires verified domain to send to external recipients
+      if (clientError?.message?.includes('domain') || clientError?.message?.includes('verify')) {
+        console.error('⚠️  NOTE: To send emails to clients, you need to verify a domain with Resend.');
+        console.error('⚠️  Currently using onboarding@resend.dev which only works for testing.');
+        console.error('⚠️  Visit https://resend.com/domains to verify your domain.');
+      }
+    }
+
+    // Return success even if client email fails (admin email is more critical)
+    if (adminEmailSent) {
+      const responseMessage = clientEmailSent 
+        ? 'Emails sent successfully' 
+        : 'Admin email sent. Client confirmation email failed (may require domain verification).';
+      
+      console.log('📊 Email status:', { 
+        admin: adminEmailSent ? '✅ Sent' : '❌ Failed',
+        client: clientEmailSent ? '✅ Sent' : '❌ Failed',
+        clientError: clientEmailError?.message || null
+      });
+
+      res.status(200).json({ 
+        message: responseMessage,
+        adminEmailSent,
+        clientEmailSent,
+        clientEmailError: clientEmailError?.message || null
+      });
+    }
   } catch (error) {
     console.error('❌ Error sending emails:', error);
     // Send a more detailed error message for debugging
     const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
     const errorStack = error instanceof Error ? error.stack : undefined;
     console.error('Error stack:', errorStack);
+    console.error('Full error object:', JSON.stringify(error, null, 2));
     res.status(500).json({ error: 'Failed to send emails', details: errorMessage });
   }
 });
